@@ -2,6 +2,8 @@ import os
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import math
+# from pytorch_msssim import MS_SSIM
 
 class CycleLoss():
     def __init__(self):
@@ -212,3 +214,20 @@ class OverLapRatioPool2d(nn.Module):
         rows = torch.cat(torch.chunk(blocks, chunks=w//self.window_size, dim=0), dim=3)
         out = torch.cat(torch.chunk(rows, chunks=h//self.window_size, dim=0), dim=2)
         return out
+
+class PSNRLoss():
+    def __init__(self, max_val=1.0):
+        self.max_val = max_val
+
+    def __call__(self, img1, img2):
+        mse = nn.functional.mse_loss(img1, img2)
+        psnr = 20 * math.log10(self.max_val) - 10 * torch.log10(mse)
+        return psnr
+
+# class MS_SSIMLoss():
+#     def __init__(self, max_val=1.0):
+#         self.max_val = max_val
+#         self.criterion = MS_SSIM(data_range=max_val, size_average=True, channel=3)
+
+#     def __call__(self, img1, img2):
+#         return 1 - self.criterion(img1, img2)

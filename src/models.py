@@ -188,7 +188,6 @@ class BUM(nn.Module):
         return fake_s_valid, real_s_valid
     
     def freeze_D(self):
-        
         for p in self.D_B.parameters():
             p.requires_grad = False
         for p in self.D_S.parameters():
@@ -199,6 +198,3 @@ class BUM(nn.Module):
             p.requires_grad = True
         for p in self.D_S.parameters():
             p.requires_grad = True
-            
-
-

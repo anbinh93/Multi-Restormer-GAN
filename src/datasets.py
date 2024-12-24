@@ -20,11 +20,17 @@ class ImgDataset(Dataset):
             transforms.ToTensor()
         ])
         
-        self.img_paths = sorted(glob.glob(f"{data_source}/{mode}/*/blur_gamma/*.*"))
-        self.gt_paths = sorted(glob.glob(f"{data_source}/{mode}/*/sharp/*.*"))
+        self.img_paths = sorted(glob.glob(f"{data_source}/{mode}/low/*.*"))
+        self.gt_paths = sorted(glob.glob(f"{data_source}/{mode}/high/*.*"))
+        
+        # Debugging statements
+        print(f"Image paths ({mode}): {self.img_paths}")
+        print(f"GT paths ({mode}): {self.gt_paths}")
+        print(f"Number of images: {len(self.img_paths)}")
+        print(f"Number of GTs: {len(self.gt_paths)}")
             
         self.img_leading = True if len(self.img_paths) >= len(self.gt_paths) else False
-        
+
     def __getitem__(self, index):
         if self.mode == 'train':
             if self.img_leading:
@@ -72,7 +78,7 @@ class ImgDataset(Dataset):
         return img, gt
 
     def __len__(self):
-        return max(len(self.img_paths), len(self.gt_paths))
+        return len(self.img_paths)
 
 def ImgLoader(dataset, batch_size, num_workers):
     shuffle = True if dataset.mode == 'train' else False

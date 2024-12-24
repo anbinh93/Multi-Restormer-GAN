@@ -1,7 +1,9 @@
+import math
 import time
 import torch
 import random
 import itertools
+import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -27,11 +29,14 @@ writer = SummaryWriter(log_dir=log_dir)
 print('---------------------------------------- step 2/5 : data loading... ------------------------------------------------')
 print('training data loading...')
 train_dataset = ImgDataset(data_source=opt.data_source, mode='train', crop=256, random_resize=720)
+print('Train dataset length:', len(train_dataset))  # Debugging statement
 train_dataloader = ImgLoader(train_dataset, batch_size=opt.train_bs // 2, num_workers=opt.num_workers)
+print(f"Number of training samples: {len(train_dataset)}")
 print('successfully loading training pairs. =====> qty:{} bs:{}'.format(len(train_dataset),opt.train_bs))
 
 print('validating data loading...')
 val_dataset = ImgDataset(data_source=opt.data_source, mode='val')
+print('Validation dataset length:', len(val_dataset))  # Debugging statement
 val_dataloader = ImgLoader(val_dataset, batch_size=opt.val_bs // 2, num_workers=opt.num_workers)
 print('successfully loading validating pairs. =====> qty:{} bs:{}'.format(len(val_dataset),opt.val_bs))
 
@@ -199,28 +204,119 @@ def train(epoch, optimal):
     
 def val(epoch, optimal):
     model.eval()
+    
+    print(''); print('Validating...', end=' ')
+
     psnr_meter = AverageMeter()
     timer = Timer()
+    
+    output_dir = './output/val_image'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    for i, (imgs, gts) in enumerate(val_dataloader):
+        real_b, real_s = imgs.cuda(), gts.cuda()
+        
+        with torch.no_grad():
+            fake_s = model.forward_G_B2S(real_b)
+        
+        psnr_meter.update(get_metrics(fake_s, real_s), real_b.shape[0])
+        
+        if i == 0:
+            if epoch == opt.val_gap:
+                save_image(real_b, output_dir + '/img_epoch_{:0>4}_iter_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+                save_image(real_s, output_dir + '/gt_epoch_{:0>4}_iter_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+            save_image(fake_s, output_dir + '/restored_epoch_{:0>4}_iter_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+        
+        # Save images for each batch
+        # save_image(real_b, output_dir + '/real_b_epoch_{:0>4}_batch_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+        save_image(real_s, output_dir + '/real_s_epoch_{:0>4}_batch_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+        # save_image(fake_s, output_dir + '/fake_s_epoch_{:0>4}_batch_{:0>4}.png'.format(epoch, i+1), nrow=opt.val_bs, normalize=True, scale_each=True)
+        
+    print('Epoch[{:0>4}/{:0>4}] PSNR: {:.4f} Time: {:.4f}'.format(epoch, opt.n_epochs, psnr_meter.average(), timer.timeit())); print('')
+    
+    if optimal[0] < psnr_meter.average():
+        optimal[0] = psnr_meter.average()
+        torch.save(model.state_dict(), models_dir + '/optimal_{:.2f}_epoch_{:0>4}.pkl'.format(optimal[0], epoch))
 
-    with torch.no_grad():
-        for i, (img, gt) in enumerate(val_dataloader):
-            img = img.cuda()
-            gt = gt.cuda()
+    writer.add_scalar('psnr', psnr_meter.average(), epoch)
 
-            # Forward pass
-            output = model(img)
+    # Compute MS-SSIM and log it
+    ms_ssim_value = compute_ms_ssim(fake_s, real_s)
+    writer.add_scalar('ms_ssim', ms_ssim_value, epoch)
+    
+    torch.save(model.state_dict(), models_dir + '/epoch_{:0>4}.pkl'.format(epoch))
 
-            # Compute PSNR
-            psnr = compute_psnr(output, gt)
-            psnr_meter.update(psnr, img.size(0))
+def gaussian(window_size, sigma):
+    gauss = torch.Tensor([math.exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    return gauss / gauss.sum()
 
-    print('Epoch[{:0>4}/{:0>4}] PSNR: {:.4f} Time: {:.4f}'.format(epoch, opt.n_epochs, psnr_meter.average(), timer.timeit()))
-    print('')
+def create_window(window_size, channel):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    return window
+
+def ssim(img1, img2, window, window_size, channel, size_average=True):
+    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
+
+def ms_ssim(img1, img2, window_size=11, size_average=True, val_range=None, weights=None):
+    if val_range is None:
+        max_val = 255 if img1.max() > 128 else 1
+        min_val = 0
+        L = max_val - min_val
+    else:
+        L = val_range
+
+    padd = 0
+    (_, channel, height, width) = img1.size()
+    window = create_window(window_size, channel).to(img1.device)
+
+    mssim = []
+    mcs = []
+    for _ in range(weights.size(0)):
+        ssim_val = ssim(img1, img2, window, window_size, channel, size_average)
+        mssim.append(ssim_val)
+        mcs.append(ssim_val)
+
+        img1 = F.avg_pool2d(img1, (2, 2))
+        img2 = F.avg_pool2d(img2, (2, 2))
+
+    mssim = torch.stack(mssim)
+    mcs = torch.stack(mcs)
+
+    weights = weights.to(img1.device)
+    pow1 = mcs ** weights
+    pow2 = mssim ** weights
+
+    return torch.prod(pow1[:-1] * pow2[-1])
 
 def compute_psnr(output, gt):
     mse = torch.mean((output - gt) ** 2)
     psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
     return psnr.item()
+
+def compute_ms_ssim(output, gt):
+    weights = torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
+    return ms_ssim(output, gt, weights=weights).item()
     
 if __name__ == '__main__':
     main()
